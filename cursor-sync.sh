@@ -115,6 +115,8 @@ check_local_changes() {
 
 # Function to check for remote changes
 check_remote_changes() {
+    log_message "Checking for remote changes..."
+
     # Skip check if we're in skip mode (just after installation)
     if [[ "$SKIP_INITIAL_CHECKS" == true ]]; then
         log_message "Skipping remote check - initial run after installation"
@@ -140,21 +142,28 @@ check_remote_changes() {
     fi
 
     # Fetch the latest changes from remote
+    log_message "Fetching latest changes from remote..."
     (cd "$GIST_DIR" && git fetch -q)
 
     # Get the current and remote hashes
     local current_hash=$(get_current_hash)
     local remote_hash=$(cd "$GIST_DIR" && git rev-parse origin/master 2>/dev/null || git rev-parse origin/main 2>/dev/null)
+    log_message "Current hash: $current_hash"
+    log_message "Remote hash: $remote_hash"
 
     # If we have a last hash file, read it
     local last_hash=""
     if [[ -f "$LAST_HASH_FILE" ]]; then
         last_hash=$(cat "$LAST_HASH_FILE")
+        log_message "Last recorded hash: $last_hash"
+    else
+        log_message "No last hash file found"
     fi
 
     # If the remote hash is different from both the current hash and the last hash, check for non-whitespace changes
     if [[ "$current_hash" != "$remote_hash" && "$last_hash" != "$remote_hash" ]]; then
         log_message "Remote hash ($remote_hash) differs from current hash ($current_hash) and last hash ($last_hash)"
+        log_message "Creating temporary branch to check for significant changes..."
 
         # Create a temporary branch to check the changes
         (cd "$GIST_DIR" && git branch -q -D temp_check 2>/dev/null || true)
@@ -162,36 +171,96 @@ check_remote_changes() {
         (cd "$GIST_DIR" && git fetch -q origin)
 
         # Try to merge but don't commit yet
+        log_message "Attempting to merge remote changes to check differences..."
         local merge_output=$(cd "$GIST_DIR" && git merge --no-commit --no-ff origin/master 2>&1 || git merge --no-commit --no-ff origin/main 2>&1)
 
         # Check if there are any non-whitespace changes
         local has_significant_changes=false
+        log_message "Checking for significant (non-whitespace) changes..."
 
         # For each file in the Gist directory
         for file in "${GIST_SETTINGS_PATHS[@]}"; do
             if [[ -f "$file" ]]; then
+                local base_name=$(basename "$file")
                 # Check if this file has changes
-                if (cd "$GIST_DIR" && git diff --name-only --staged | grep -q "$(basename "$file")"); then
-                    # Check if changes are only whitespace
-                    local diff_output=$(cd "$GIST_DIR" && git diff --ignore-all-space --ignore-blank-lines --staged "$(basename "$file")")
+                if (cd "$GIST_DIR" && git diff --name-only --staged | grep -q "$base_name"); then
+                    log_message "File $base_name has changes, checking if they're significant..."
 
-                    if [[ -n "$diff_output" ]]; then
-                        log_message "Significant changes detected in remote $(basename "$file")"
+                    # Create temporary files for comparison
+                    local temp_current=$(mktemp)
+                    local temp_remote=$(mktemp)
+
+                    # For JSON files, we can normalize them to remove formatting differences
+                    if [[ "$file" == *".json" ]]; then
+                        # Use jq to normalize JSON if available, otherwise use simple whitespace removal
+                        if command -v jq &> /dev/null; then
+                            # Get current version content
+                            jq -c '.' "$file" > "$temp_current" 2>/dev/null || cat "$file" | tr -d '[:space:]' > "$temp_current"
+
+                            # Get remote version content (save to a temp file first)
+                            local temp_remote_file=$(mktemp)
+                            (cd "$GIST_DIR" && git show "origin/master:$base_name" > "$temp_remote_file" 2>/dev/null) || \
+                            (cd "$GIST_DIR" && git show "origin/main:$base_name" > "$temp_remote_file" 2>/dev/null)
+
+                            # Normalize remote content
+                            jq -c '.' "$temp_remote_file" > "$temp_remote" 2>/dev/null || cat "$temp_remote_file" | tr -d '[:space:]' > "$temp_remote"
+                            rm "$temp_remote_file"
+                        else
+                            # Get current version content
+                            cat "$file" | tr -d '[:space:]' > "$temp_current"
+
+                            # Get remote version content (save to a temp file first)
+                            local temp_remote_file=$(mktemp)
+                            (cd "$GIST_DIR" && git show "origin/master:$base_name" > "$temp_remote_file" 2>/dev/null) || \
+                            (cd "$GIST_DIR" && git show "origin/main:$base_name" > "$temp_remote_file" 2>/dev/null)
+
+                            # Normalize remote content
+                            cat "$temp_remote_file" | tr -d '[:space:]' > "$temp_remote"
+                            rm "$temp_remote_file"
+                        fi
+                    else
+                        # For non-JSON files, just remove all whitespace
+                        # Get current version content
+                        cat "$file" | tr -d '[:space:]' > "$temp_current"
+
+                        # Get remote version content (save to a temp file first)
+                        local temp_remote_file=$(mktemp)
+                        (cd "$GIST_DIR" && git show "origin/master:$base_name" > "$temp_remote_file" 2>/dev/null) || \
+                        (cd "$GIST_DIR" && git show "origin/main:$base_name" > "$temp_remote_file" 2>/dev/null)
+
+                        # Normalize remote content
+                        cat "$temp_remote_file" | tr -d '[:space:]' > "$temp_remote"
+                        rm "$temp_remote_file"
+                    fi
+
+                    # Compare normalized content
+                    if ! cmp -s "$temp_current" "$temp_remote"; then
+                        log_message "Significant changes detected in remote $base_name"
                         has_significant_changes=true
+
+                        # Clean up temp files
+                        rm "$temp_current" "$temp_remote"
                         break
                     else
-                        log_message "Only whitespace changes in remote $(basename "$file") - ignoring"
+                        log_message "Only whitespace changes in remote $base_name - ignoring"
                     fi
+
+                    # Clean up temp files
+                    rm "$temp_current" "$temp_remote"
+                else
+                    log_message "No changes detected in $base_name"
                 fi
             fi
         done
 
         # Abort the merge and go back to the original branch
+        log_message "Cleaning up temporary branch..."
         (cd "$GIST_DIR" && git merge --abort 2>/dev/null || true)
         (cd "$GIST_DIR" && git checkout -q master 2>/dev/null || git checkout -q main 2>/dev/null)
         (cd "$GIST_DIR" && git branch -q -D temp_check 2>/dev/null || true)
 
         if [[ "$has_significant_changes" == true ]]; then
+            log_message "Significant changes found - will prompt for pull"
             return 0  # Significant changes detected
         else
             # Update the last hash file to avoid detecting these whitespace changes again
@@ -200,6 +269,7 @@ check_remote_changes() {
             return 1  # No significant changes
         fi
     else
+        log_message "No remote changes detected"
         return 1  # No changes
     fi
 }
@@ -233,42 +303,39 @@ show_diff() {
         # Show diff between local files and gist files
         for i in "${!SETTINGS_PATHS[@]}"; do
             if [[ -f "${SETTINGS_PATHS[$i]}" && -f "${GIST_SETTINGS_PATHS[$i]}" ]]; then
-                # For JSON files, try to use a prettier diff if jq is available
-                if [[ "${SETTINGS_PATHS[$i]}" == *".json" ]] && command -v jq &> /dev/null; then
-                    local local_json=$(jq -S . "${SETTINGS_PATHS[$i]}" 2>/dev/null)
-                    local gist_json=$(jq -S . "${GIST_SETTINGS_PATHS[$i]}" 2>/dev/null)
+                log_message "Generating diff for ${SETTINGS_PATHS[$i]}"
 
-                    if [[ $? -eq 0 ]]; then
-                        # Create temporary files with sorted JSON
-                        local temp_local_json=$(mktemp)
-                        local temp_gist_json=$(mktemp)
-                        echo "$local_json" > "$temp_local_json"
-                        echo "$gist_json" > "$temp_gist_json"
-
-                        local file_diff=$(diff -u "$temp_gist_json" "$temp_local_json" | grep -v "^---" | grep -v "^+++" | head -n 20)
-                        rm "$temp_local_json" "$temp_gist_json"
-                    else
-                        # Fallback to regular diff if jq fails
-                        local file_diff=$(diff -u "${GIST_SETTINGS_PATHS[$i]}" "${SETTINGS_PATHS[$i]}" | grep -v "^---" | grep -v "^+++" | head -n 20)
-                    fi
+                # Use colored diff if possible
+                local file_diff=""
+                if command -v colordiff &> /dev/null; then
+                    file_diff=$(diff -u "${GIST_SETTINGS_PATHS[$i]}" "${SETTINGS_PATHS[$i]}" | colordiff | head -n 20)
                 else
-                    # Regular diff for non-JSON files
-                    local file_diff=$(diff -u "${GIST_SETTINGS_PATHS[$i]}" "${SETTINGS_PATHS[$i]}" | grep -v "^---" | grep -v "^+++" | head -n 20)
+                    file_diff=$(diff -u "${GIST_SETTINGS_PATHS[$i]}" "${SETTINGS_PATHS[$i]}" | grep -v "^---" | grep -v "^+++" | head -n 20)
                 fi
 
                 if [[ -n "$file_diff" ]]; then
-                    diff_output="${diff_output}Changes in $(basename "${SETTINGS_PATHS[$i]}"):\n${file_diff}\n\n"
+                    local base_name=$(basename "${SETTINGS_PATHS[$i]}")
+                    diff_output="${diff_output}Changes in $base_name:\n${file_diff}\n\n"
                 fi
             fi
         done
     elif [[ "$action" == "pull" ]]; then
         # Show diff between remote and local files
         (cd "$GIST_DIR" && git fetch -q)
+        log_message "Generating diff for remote changes"
 
         for file in "${GIST_SETTINGS_PATHS[@]}"; do
             if [[ -f "$file" ]]; then
                 local base_name=$(basename "$file")
-                local file_diff=$(cd "$GIST_DIR" && git diff --color=never HEAD..origin/master -- "$base_name" 2>/dev/null || git diff --color=never HEAD..origin/main -- "$base_name" 2>/dev/null)
+                local file_diff=""
+
+                # Try to use colored diff if possible
+                if command -v colordiff &> /dev/null; then
+                    file_diff=$(cd "$GIST_DIR" && git diff --color=always HEAD..origin/master -- "$base_name" 2>/dev/null || git diff --color=always HEAD..origin/main -- "$base_name" 2>/dev/null | colordiff)
+                else
+                    file_diff=$(cd "$GIST_DIR" && git diff --color=never HEAD..origin/master -- "$base_name" 2>/dev/null || git diff --color=never HEAD..origin/main -- "$base_name" 2>/dev/null)
+                fi
+
                 if [[ -n "$file_diff" ]]; then
                     # Clean up the diff output for display
                     file_diff=$(echo "$file_diff" | grep -v "^diff --git" | grep -v "^index" | grep -v "^---" | grep -v "^+++" | head -n 20)
@@ -283,8 +350,14 @@ show_diff() {
         diff_output="$(echo -e "$diff_output" | head -n 20)\n...(more changes not shown)..."
     fi
 
+    # If no changes were found, indicate that
+    if [[ -z "$diff_output" ]]; then
+        diff_output="No significant changes detected. Only whitespace differences may exist."
+    fi
+
     # Return the diff output
     echo -e "$diff_output" > "$temp_file"
+    log_message "Diff generated and saved to temporary file"
     echo "$temp_file"
 }
 
