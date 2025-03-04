@@ -17,6 +17,8 @@ Unlike VS Code, Cursor currently doesn't have a built-in settings sync feature. 
 - **Extension Synchronization**: Keeps your installed extensions in sync
 - **Automatic Setup**: Creates necessary symlinks and initial configuration
 - **Detailed Logging**: Maintains a log of all sync activities
+- **Smart Change Detection**: Ignores whitespace-only changes to prevent unnecessary sync prompts
+- **Change Preview**: Shows a diff of changes before pushing or pulling
 
 ## Prerequisites
 
@@ -112,10 +114,13 @@ launchctl load ~/Library/LaunchAgents/com.user.cursorsync.plist
 ## How It Works
 
 1. **Initial Setup**: The script creates symlinks from your Cursor settings files to the cloned Gist repository.
-2. **Periodic Checks**: Every 5 minutes, the script checks for changes in both local and remote settings.
-3. **Change Detection**: When changes are detected, you'll receive a notification asking if you want to sync.
-4. **Synchronization**: The script handles pushing local changes to GitHub or pulling remote changes to your local machine.
-5. **Conflict Resolution**: If conflicts occur, the script automatically resolves them by keeping your local version and creating backups.
+2. **Startup Behavior**: After installation, the script waits for the full sync interval (20 minutes) before performing its first check to avoid immediate prompts.
+3. **Periodic Checks**: Every 20 minutes, the script checks for changes in both local and remote settings.
+4. **Smart Change Detection**: The script ignores whitespace-only changes, preventing unnecessary sync prompts.
+5. **Change Detection**: When significant changes are detected, you'll receive a notification asking if you want to sync.
+6. **Change Preview**: Before confirming a sync, you'll see a diff showing exactly what changes will be pushed or pulled.
+7. **Synchronization**: The script handles pushing local changes to GitHub or pulling remote changes to your local machine.
+8. **Conflict Resolution**: If conflicts occur, the script automatically resolves them by keeping your local version and creating backups.
 
 ## File Locations
 
@@ -144,11 +149,28 @@ Check the log file for detailed information:
 cat ~/cursor-settings/sync.log
 ```
 
+The log file contains timestamps and detailed information about what the script is doing, including when it's skipping checks, detecting changes, and performing synchronization.
+
 ### Common Issues
 
 1. **Authentication Issues**: Ensure you have proper Git credentials set up for pushing to GitHub.
+   - For HTTPS URLs, you might need a personal access token
+   - For SSH, make sure your SSH key is added to GitHub
+
 2. **Symlink Creation Fails**: On Windows, you may need to run the script as Administrator to create symlinks.
-3. **Cursor Not Found**: If the script can't find Cursor, update the `CURSOR_BIN` variable in the script.
+
+3. **Changes Not Detected**: Make sure the script is running in the background. Check the log file for any errors.
+   - On macOS, verify the LaunchAgent is loaded with: `launchctl list | grep cursorsync`
+   - On Windows, check if the script is running in Task Manager
+
+4. **Immediate Sync Prompts**: If you're getting sync prompts immediately after installation:
+   - Check the log file to see what's happening
+   - Verify that the `.last_hash` file was created in your `~/cursor-settings` directory
+   - You can manually create or update this file with: `cd ~/cursor-settings && git rev-parse HEAD > .last_hash`
+
+5. **Popup Dialogs Not Responding**: If you dismiss a popup by clicking the X button instead of one of the buttons, the script will continue running normally.
+
+6. **JSON Formatting Differences**: The script now intelligently handles JSON formatting differences and will only prompt for sync when there are actual content changes, not just formatting changes.
 
 ## Security Considerations
 
